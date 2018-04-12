@@ -1,4 +1,4 @@
-from typing import Union, Mapping, Iterable
+from typing import Union, Mapping, Iterable, get_type_hints
 import hashlib
 import binascii
 import json
@@ -39,5 +39,27 @@ def chunks(l, n) -> Iterable[Iterable]:
     return (l[i:i+n] for i in range(0, len(l), n))
 
 
-for x in chunks([1,2,3,4], 2):
-    print(x)
+def deserialize(serialized: str) -> object:
+    """NamedTuple-flavored serialization from JSON."""
+    gs = globals()
+
+    def contents_to_objs(o):
+        if isinstance(o, list):
+            return [contents_to_objs(i) for i in o]
+        elif not isinstance(o, Mapping):
+            return o
+
+        _type = gs[o.pop('_type', None)]
+        bytes_keys = {
+            k for k, v in get_type_hints(_type).items() if v == bytes
+        }
+
+        for k, v in o.items():
+            o[k] = contents_to_objs(v)
+
+            if k in bytes_keys:
+                o[k] = binascii.unhexlify(o[k]) if o[k] else o[k]
+
+        return _type(**o)
+
+    return contents_to_objs(json.loads(serialized))
