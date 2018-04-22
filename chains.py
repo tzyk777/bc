@@ -1,24 +1,22 @@
 import binascii
-import time
-import json
 import hashlib
-import threading
+import json
 import logging
-import socketserver
-import socket
-import random
 import os
-from functools import lru_cache, wraps
+import random
+import socket
+import socketserver
+import threading
+import time
+from functools import lru_cache
+from functools import wraps
 from typing import (
-    Iterable, NamedTuple, Dict, Mapping, Union, get_type_hints, Tuple,
-    Callable)
+    Dict, Callable)
+from typing import NamedTuple, Tuple
+from typing import Union, Mapping, Iterable, get_type_hints
 
 import ecdsa
 from base58 import b58encode_check
-from utils import sha256d, serialize, deserialize
-from merkle_tree import get_merkle_root_of_txns
-
-
 
 logging.basicConfig(
     level=getattr(logging, os.environ.get('TC_LOG_LEVEL', 'INFO')),
@@ -152,7 +150,7 @@ class Transaction(NamedTuple):
         if len(serialize(self)) > Params.MAX_BLOCK_SERIALIZED_SIZE:
             raise TxnValidationError('Too large')
 
-        if sum(t.value for t in self.txins) > Params.MAX_MONEY:
+        if sum(t.value for t in self.txouts) > Params.MAX_MONEY:
             raise TxnValidationError('Spend value too high')
 
 
@@ -164,7 +162,7 @@ class Block(NamedTuple):
     prev_block_hash: str
 
     # A hash of the Merkle tree containing all txns
-    markle_hash: str
+    merkle_hash: str
 
     # A UNIX timestamp of when this block was created.
     timestamp: int
@@ -183,7 +181,7 @@ class Block(NamedTuple):
         This is hashed in an attempt to discover a nonce under the difficulty
         """
         return (
-            f'{self.version}{self.prev_block_hash}{self.markle_hash}'
+            f'{self.version}{self.prev_block_hash}{self.merkle_hash}'
             f'{self.timestamp}{self.bits}{nonce or self.nonce}'
         )
 
@@ -197,7 +195,7 @@ class Block(NamedTuple):
 
 genesis_block = Block(
     version=0, prev_block_hash=None,
-    markle_hash=(
+    merkle_hash=(
         '7118894203235a955a908c0abfc6d8fe6edec47b0a04ce1bf7263da3b4366d22'
     ),
     timestamp=1501821412, bits=24, nonce=10126761,
@@ -315,7 +313,7 @@ def connect_block(block: Union[str, Block],
 
     if (not doing_reorg and reorg_if_necessary()) or chain_idx == ACTIVE_CHAIN_IDX:
         mine_interrupt.set()
-        logger.info('block accepted height={len(active_chain) - 1} txns={len(block.txns)}')
+        logger.info(f'block accepted height={len(active_chain) - 1} txns={len(block.txns)}')
 
     for peer in peer_hostnames:
         send_to_peer(block, peer)
@@ -344,7 +342,7 @@ def validate_block(block: Block) -> Block:
         logger.exception(f"transaction {txn} in {block} failed to validate")
         raise BlockValidationError(f"invalid txn {txn.id}")
 
-    if get_merkle_root_of_txns(block.txns).val != block.markle_hash:
+    if get_merkle_root_of_txns(block.txns).val != block.merkle_hash:
         raise BlockValidationError('Merkle has invalid')
 
     if block.timestamp <= get_median_time_past(11):
@@ -484,6 +482,36 @@ def add_txn_to_mempool(txn: Transaction):
         for peer in peer_hostnames:
             send_to_peer(txn, peer)
 
+
+# Merkle Tree
+
+
+class MerkleNode(NamedTuple):
+    val: str
+    children: Iterable = None
+
+
+@lru_cache(maxsize=1024)
+def get_merkle_root(*leaves: Tuple[str]) -> MerkleNode:
+    """Builds a Merkle tree and returns the root given some leaves"""
+    if len(leaves) % 2 == 1:
+        leaves = leaves + (leaves[-1],)
+
+    def find_root(nodes):
+        newlevel = [
+            MerkleNode(sha256d(i1.val + i2.val), children=[i1, i2])
+            for [i1, i2] in chunks(nodes, 2)
+        ]
+
+        return find_root(newlevel) if len(newlevel) > 1 else newlevel[0]
+
+    return find_root([MerkleNode(sha256d(l)) for l in leaves])
+
+
+def get_merkle_root_of_txns(txns):
+    return get_merkle_root(*[t.id for t in txns])
+
+
 # UTXO set
 
 utxo_set: Mapping[OutPoint, UnspentTxOut] = {}
@@ -555,7 +583,7 @@ def assemble_and_solve_block(pay_coinbase_to_addr, txns=None):
     block = Block(
         version=0,
         prev_block_hash=prev_block_hash,
-        markle_hash='',
+        merkle_hash='',
         timestamp=int(time.time()),
         bits=get_next_work_required(prev_block_hash),
         nonce=0,
@@ -571,7 +599,7 @@ def assemble_and_solve_block(pay_coinbase_to_addr, txns=None):
         my_address, (get_block_subsidy() + fees), len(active_chain)
     )
     block = block._replace(txns=[coinbase_txn, *block.txns])
-    block = block._replace(markle_hash=get_merkle_root_of_txns(block.txns).val)
+    block = block._replace(merkle_hash=get_merkle_root_of_txns(block.txns).val)
 
     if len(serialize(block)) > Params.MAX_BLOCK_SERIALIZED_SIZE:
         raise ValueError('txns specified create a block too large')
@@ -666,11 +694,11 @@ def init_wallet(path=None):
     if os.path.exists(path):
         with open(path, 'rb') as f:
             signing_key = ecdsa.SigningKey.from_string(
-                f.read(), curv=ecdsa.SECP256K1
+                f.read(), curve=ecdsa.SECP256k1
             )
     else:
         logger.info(f"generating new wallet: '{path}'")
-        signing_key = ecdsa.SigningKey.generate(curve=ecdsa.SECP256K1)
+        signing_key = ecdsa.SigningKey.generate(curve=ecdsa.SECP256k1)
         with open(path, 'wb') as f:
             f.write(signing_key.to_string())
 
@@ -727,7 +755,7 @@ def validate_txn(txn: Transaction,
 def validate_signature_for_spend(txin, utxo: UnspentTxOut, txn):
     pubkey_as_addr = pubkey_to_address(txin.unlock_pk)
     verifying_key = ecdsa.VerifyingKey.from_string(
-        txin.unlock_pk, curve=ecdsa.SECP256K1
+        txin.unlock_pk, curve=ecdsa.SECP256k1
     )
 
     if pubkey_as_addr != utxo.to_address:
@@ -790,6 +818,8 @@ def try_reorg(branch, branch_idx, fork_idx) -> bool:
     def roolback_reorg():
         logger.info(f'reorg of idx {branch_idx} to active_chain failed.')
         list()
+
+
 class TxnValidationError(BaseException):
     def __init__(self, *args, to_orphan: Transaction = None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -953,6 +983,7 @@ class TCPHandler(socketserver.BaseRequestHandler):
 
 CHAIN_PATH = os.environ.get('TC_CHAIN_PATH', 'chain.dat')
 
+
 @with_lock(chain_lock)
 def save_to_disk():
     with open(CHAIN_PATH, 'wb') as f:
@@ -968,6 +999,7 @@ def load_from_disk():
         with open(CHAIN_PATH, 'rb') as f:
             msg_len = int(binascii.hexlify(f.read(4) or b'\x00'), 16)
             new_blocks = deserialize(f.read(msg_len))
+            logger.info(f'Blocks: {new_blocks}')
             logger.info(f'loading chain from disk with {len(new_blocks)} blocks')
             for block in new_blocks:
                 connect_block(block)
@@ -975,11 +1007,75 @@ def load_from_disk():
         logger.exception('load chain failed, starting from genesis')
 
 
+# Utils
+def sha256d(s: Union[str, bytes]) -> str:
+    """A double SHA-256 hash."""
+    if not isinstance(s, bytes):
+        s = s.encode()
+
+    return hashlib.sha256(hashlib.sha256(s).digest()).hexdigest()
+
+
+def serialize(obj) -> str:
+    """NamedTuple-flavord serliazation to JSON."""
+    def contents_to_primitive(o):
+        if hasattr(o, '_asdict'):
+            o = {**o._asdict(), '_type': type(o).__name__}
+        elif isinstance(o, (list, tuple)):
+            return [contents_to_primitive(i) for i in o]
+        elif isinstance(o, bytes):
+            return binascii.hexlify(o).decode()
+        elif not isinstance(o, (dict, bytes, str, int, type(None))):
+            raise ValueError(f"Can't serialize {o}")
+
+        if isinstance(o, Mapping):
+            for key, value in o.items():
+                o[key] = contents_to_primitive(value)
+
+        return o
+
+    return json.dumps(
+        contents_to_primitive(obj), sort_keys=True, separators=(',', ':')
+    )
+
+
+def chunks(l, n) -> Iterable[Iterable]:
+    return (l[i:i+n] for i in range(0, len(l), n))
+
+
+def deserialize(serialized: str) -> object:
+    """NamedTuple-flavored serialization from JSON."""
+    gs = globals()
+
+    def contents_to_objs(o):
+        if isinstance(o, list):
+            return [contents_to_objs(i) for i in o]
+        elif not isinstance(o, Mapping):
+            return o
+
+        _type = gs[o.pop('_type', None)]
+        bytes_keys = {
+            k for k, v in get_type_hints(_type).items() if v == bytes
+        }
+
+        for k, v in o.items():
+            o[k] = contents_to_objs(v)
+
+            if k in bytes_keys:
+                o[k] = binascii.unhexlify(o[k]) if o[k] else o[k]
+
+        return _type(**o)
+
+    return contents_to_objs(json.loads(serialized))
+
+
 # Main
 
 PORT = os.environ.get('TC_PORT', 9999)
 
+
 def main():
+    """NamedTuple-flavored serialization from JSON."""
     load_from_disk()
 
     workers = []
