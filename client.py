@@ -1,9 +1,13 @@
+#!/usr/bin/env python3
+
 """
 ⛼  tinychain client
+
 Usage:
   client.py balance [options] [--raw]
   client.py send [options] <addr> <val>
   client.py status [options] <txid> [--csv]
+
 Options:
   -h --help            Show help
   -w, --wallet PATH    Use a particular wallet file (e.g. `-w ./wallet2.dat`)
@@ -29,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 def main(args):
     args['signing_key'], args['verifying_key'], args['my_addr'] = (
-        t.init_wallet(args.get('--wallet'))
+        t.init_wallet(args.get('--wallet') or None)
     )
 
     if args['--port']:
@@ -50,7 +54,7 @@ def get_balance(args):
     Get the balance of a given address.
     """
     val = sum(i.value for i in find_utxo_for_address(args))
-    print(val if args['--raw'] else f"{val / t.Params.BELUSHIS_PER_COIN} ⛼")
+    print(val if args['--raw'] else f"{val / t.Params.BELUSHIS_PER_COIN}")
 
 
 def txn_status(args):
@@ -84,7 +88,7 @@ def send_value(args: dict):
     val, to_addr, sk = int(args['<val>']), args['<addr>'], args['signing_key']
     selected = set()
     my_coins = list(sorted(
-        find_utxos_for_address(args), key=lambda i: (i.value, i.height)))
+        find_utxo_for_address(args), key=lambda i: (i.value, i.height)))
 
     for coin in my_coins:
         selected.add(coin)
@@ -93,6 +97,8 @@ def send_value(args: dict):
 
     txout = t.TxOut(value=val, to_address=to_addr)
 
+    logger.info(f'selected')
+    import pdb;pdb.set_trace()
     txn = t.Transaction(
         txins=[make_txin(sk, coin.outpoint, txout) for coin in selected],
         txouts=[txout]

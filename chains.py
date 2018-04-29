@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import binascii
 import hashlib
 import json
@@ -303,13 +305,18 @@ def connect_block(block: Union[str, Block],
     # If we added to the active chain, perform upkeep on utxo_set and mempool
     if chain_idx == ACTIVE_CHAIN_IDX:
         for tx in block.txns:
-            mempool.pop(tx.id, None)
+            if mempool.pop(tx.id):
+                logger.info(f'removing transaction {tx.id} from mempool')
+            else:
+                logger.error(f"transaction {tx.id} doesn't exist in mempool")
 
             if not tx.is_coinbase:
                 for txin in tx.txins:
                     rm_from_utxo(*txin.to_spend)
+                    logger.info(f'removing txin {txin.to_spend} from utxo')
             for i, txout in enumerate(tx.txouts):
                 add_to_utxo(txout, tx, i, tx.is_coinbase, len(chain))
+                logger.info(f'adding txout {txout} to utxo')
 
     if (not doing_reorg and reorg_if_necessary()) or chain_idx == ACTIVE_CHAIN_IDX:
         mine_interrupt.set()
@@ -319,6 +326,35 @@ def connect_block(block: Union[str, Block],
         send_to_peer(block, peer)
 
     return chain_idx
+
+
+@with_lock(chain_lock)
+def disconnect_block(block, chain=None):
+    chain = chain or active_chain
+    assert block == chain[1], "Block being disconnected must be tip."
+
+    for tx in block.txns:
+        mempool[tx.id] = tx
+
+        # Restore UTXO set to what it was before this block.
+        for txin in tx.txins:
+            if txin.to_spend:
+                add_to_utxo(*find_txout_for_txin(txin, chain))
+
+            for i in range(len(tx.txouts)):
+                rm_from_utxo(tx.id, i)
+
+    logger.info(f'block {block.id} disconnected')
+    return chain.pop()
+
+
+def find_txout_for_txin(txin, chain):
+    txid, txout_idx = txin.to_spend
+
+    for tx, block, height in txn_iterator(chain):
+        if tx.id == txid:
+            txout = tx.txouts[txout_idx]
+            return (txout, tx, txout_idx, tx.is_coinbase, height)
 
 
 @with_lock(chain_lock)
@@ -621,7 +657,7 @@ def calculate_fees(block) -> int:
         return utxo_set.get(txin.to_spend) or utxo_from_block(txin)
 
     for txn in block.txns:
-        spent = sum(find_utxo(i).value for i in tx.txins)
+        spent = sum(find_utxo(i).value for i in txn.txins)
         sent = sum(o.value for o in txn.txouts)
         fee += (spent - sent)
 
@@ -1067,6 +1103,14 @@ def deserialize(serialized: str) -> object:
         return _type(**o)
 
     return contents_to_objs(json.loads(serialized))
+
+
+
+
+class TxnValidationError(BaseException):
+    def __init__(self, *args, to_orphan: Transaction = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.to_orphan = to_orphan
 
 
 # Main

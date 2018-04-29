@@ -4,11 +4,11 @@ services:
 
   node1:
     build: .
-    image: tinychain
+    image: chains
     ports:
       - "9999:9999"
 
   node2:
-    image: tinychain
+    image: chains
     environment:
       TC_PEERS: 'node1'
